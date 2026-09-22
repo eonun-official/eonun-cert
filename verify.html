@@ -6,7 +6,7 @@
 <title>Eonun · 证书验证</title>
 <script>/* ---------- 内置公钥（可公开 · 仅用于验签 · 换钥时在此追加，勿删旧钥） ---------- */
 const PUBLIC_KEYS = [
-  "04522dfa1a80b8ff1981d40a58ceff2048b4bfe3c3e9567cbaefbb288cf0271a19a31fe929bef9103a6b9d0e8ba4d59737b19bdbbcff44f2e26581d5eb7f891ac5"
+  "04cb14e2205f64f864ff06a27d8d3d0999d3147fd2c691b94ecb677584760f9ccf991b5d3534210ee6c96a9c96103114bfa2ddbd50cc82a15d820d821cd2e474a6"
 ];
 
 /* ---------- SHA-256 ---------- */
@@ -307,6 +307,7 @@ function ecVerifyAny(msg, sigHex) {
 
   .foot { margin-top: 40px; font-size: 11px; color: rgba(255,255,255,0.25); letter-spacing: 0.2em; }
 </style>
+<base target="_blank">
 </head>
 <body>
 
@@ -381,6 +382,7 @@ const I18N = {
     fmt_meta: '请输入 <b>编号.签名</b> 格式的完整字符串（签名为 128 位十六进制）',
     fail_title: '验证失败',
     fail_note: '本页面仅使用公钥验签，任何人均可安全使用。如确认输入无误，请联系发证方核实。',
+    valid_title: '证书有效',
     revoked_title: '证书已注销',
     revoked_note: '注销备注：{note}<br>本证书及关联回馈权益已失效。',
     valid_meta_reg: '证书编号<br><b>{id}</b>（{name}）<br>数字签名校验通过 · 登记状态：正常',
@@ -421,6 +423,7 @@ const I18N = {
     fmt_meta: 'Enter the full string as <b>ID.SIGNATURE</b> (signature = 128 hex characters)',
     fail_title: 'Verification failed',
     fail_note: 'This page verifies with public keys only and is safe for anyone to use. If the input is correct, please contact the issuer.',
+    valid_title: 'Certificate Valid',
     revoked_title: 'Certificate revoked',
     revoked_note: 'Revocation note: {note}<br>This certificate and its associated benefits are void.',
     valid_meta_reg: 'Certificate ID<br><b>{id}</b> ({name})<br>Signature verified · Registry: active',
@@ -498,7 +501,7 @@ function verify() {
   // 权威顺序：GitHub 发布的 registry.json > 本地导入的登记册
   const remote = remoteRegistry.get(id);
   const entry = remote || registry.get(id);
-  const namePart = entry.name ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
+  const namePart = (entry && entry.name) ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
   if (entry && entry.status === '失效') {
     r.className = 'result warn';
     setR('⚠', t('revoked_title'),
