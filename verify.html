@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eonun · 证书验证</title>
+<script>/* ---------- 内置公钥（可公开 · 仅用于验签 · 换钥时在此追加，勿删旧钥） ---------- */
+const PUBLIC_KEYS = [
+  "04cb14e2205f64f864ff06a27d8d3d0999d3147fd2c691b94ecb677584760f9ccf991b5d3534210ee6c96a9c96103114bfa2ddbd50cc82a15d820d821cd2e474a6"
+];
+
+/* ---------- SHA-256 ---------- */
+function sha256(ascii) {
+  function rr(v,a){return (v>>>a)|(v<<(32-a));}
+  var mp=Math.pow, mw=mp(2,32), result='';
+  var words=[], bitLen=ascii.length*8;
+  var hash=sha256.h=sha256.h||[], k=sha256.k=sha256.k||[];
+  var pc=k.length, comp={};
+  for (var c=2; pc<64; c++) {
+    if (!comp[c]) {
+      for (var i=0;i<313;i+=c) comp[i]=c;
+      hash[pc]=(mp(c,.5)*mw)|0;
+      k[pc++]=(mp(c,1/3)*mw)|0;
+    }
+  }
+  ascii+='\x80';
+  while (ascii.length%64-56) ascii+='\x00';
+  for (var i=0;i<ascii.length;i++) {
+    var j=ascii.charCodeAt(i); if (j>>8) return;
+    words[i>>2]|=j<<((3-i)%4)*8;
+  }
+  words[words.length]=(bitLen/mw)|0;
+  words[words.length]=bitLen;
+  for (var j=0;j<words.length;) {
+    var w=words.slice(j,j+=16);
+    var old=hash.slice(0,8);
+    for (var i=0;i<64;i++) {
+      var w15=w[i-15], w2=w[i-2];
+      var a=hash[0], e=hash[4];
+      var t1=hash[7]
+        +(rr(e,6)^rr(e,11)^rr(e,25))
+        +((e&hash[5])^(~e&hash[6]))
+        +k[i]
+        +(w[i]=(i<16)?w[i]:(w[i-16]+(rr(w15,7)^rr(w15,18)^(w15>>>3))+w[i-7]+(rr(w2,17)^rr(w2,19)^(w2>>>10)))|0);
+      var t2=(rr(a,2)^rr(a,13)^rr(a,22))+((a&hash[1])^(a&hash[2])^(hash[1]&hash[2]));
+      hash=[(t1+t2)|0].concat(hash);
+      hash[4]=(hash[4]+t1)|0;
+    }
+    for (var i=0;i<8;i++) hash[i]=(hash[i]+old[i])|0;
+  }
+  for (var i=0;i<8;i++) {
+    for (var j=3;j+1;j--) {
+      var b=(hash[i]>>(j*8))&255;
+      result+=((b<16)?'0':'')+b.toString(16);
+    }
+  }
+  return result;
+}
+
+/* ---------- P-256 ECDSA · 仅验签 ---------- */
+const EC_P  = BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff');
+const EC_A  = EC_P - 3n;
+const EC_N  = BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551');
+const EC_G  = [BigInt('0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296'),
+               BigInt('0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5')];
+const EC_B  = BigInt('0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b');
+
+function ecMod(a, m) { return ((a % m) + m) % m; }
+function ecInv(a, m) {
+  let lm = 1n, hm = 0n, low = ecMod(a, m), high = m;
+  while (low > 1n) {
+    const r = high / low;
+    [lm, hm] = [hm - lm * r, lm];
+    [low, high] = [high - low * r, low];
+  }
+  return ecMod(lm, m);
+}
+function ecAdd(P, Q) {
+  if (!P) return Q;
+  if (!Q) return P;
+  const [x1, y1] = P, [x2, y2] = Q;
+  if (x1 === x2 && ecMod(y1 + y2, EC_P) === 0n) return null;
+  let m;
+  if (x1 === x2 && y1 === y2) m = ecMod(3n * x1 * x1 + EC_A, EC_P) * ecInv(2n * y1, EC_P) % EC_P;
+  else                        m = ecMod(y2 - y1, EC_P) * ecInv(ecMod(x2 - x1, EC_P), EC_P) % EC_P;
+  const x3 = ecMod(m * m - x1 - x2, EC_P);
+  const y3 = ecMod(m * (x1 - x3) - y1, EC_P);
+  return [x3, y3];
+}
+function ecMul(k, P) {
+  let R = null, N = P;
+  while (k > 0n) {
+    if (k & 1n) R = ecAdd(R, N);
+    N = ecAdd(N, N);
+    k >>= 1n;
+  }
+  return R;
+}
+function ecPointFromHex(h) {
+  if (typeof h !== 'string' || !/^04[0-9a-f]{128}$/i.test(h)) return null;
+  const x = BigInt('0x' + h.slice(2, 66)), y = BigInt('0x' + h.slice(66, 130));
+  if (ecMod(y * y - (x * x * x + EC_A * x + EC_B), EC_P) !== 0n) return null;
+  return [x, y];
+}
+function ecVerifyOne(pubHex, msgHexHash, sigHex) {
+  const Q = ecPointFromHex(pubHex);
+  if (!Q) return false;
+  if (!/^[0-9a-f]{128}$/i.test(sigHex)) return false;
+  const r = BigInt('0x' + sigHex.slice(0, 64)), s = BigInt('0x' + sigHex.slice(64, 128));
+  if (r < 1n || r >= EC_N || s < 1n || s >= EC_N) return false;
+  const z = BigInt('0x' + msgHexHash);
+  const w = ecInv(s, EC_N);
+  const P = ecAdd(ecMul(ecMod(z * w, EC_N), EC_G), ecMul(ecMod(r * w, EC_N), Q));
+  if (!P) return false;
+  return ecMod(P[0], EC_N) === r;
+}
+/* 公钥集合 = 内置基线 ∪ 本地追加（localStorage 持久；本地永不能删除/覆盖内置，改页面代码才会更新基线） */
+const LS_PUB = 'eonun_pubkeys_v1';
+let localPubs = [];
+let remotePubs = [];   // 在线模式从同目录 keys.json 读取（在 GitHub 上传该文件即可新增公信公钥，无需改代码）
+
+let remoteRegistry = new Map();   // 在线模式从同目录 registry.json 读取（仅含编号+状态的公开注销名单）
+function loadRemoteRegistry(){
+  if (location.protocol !== 'https:') return;
+  fetch('registry.json', { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : [])
+    .then(d => {
+      if (Array.isArray(d)) {
+        remoteRegistry = new Map();
+        d.forEach(x => {
+          const i = String(x.id || '').trim().toUpperCase();
+          if (i) remoteRegistry.set(i, { status: x.status === '失效' ? '失效' : '有效' });
+        });
+      }
+      if (location.hash.length > 1 && typeof verify === 'function') { try { verify(); } catch(e){} }
+    })
+    .catch(() => {});
+}
+
+function loadRemotePubs(){
+  if (location.protocol !== 'https:') return;   // 本地 file:// 读不了，静默回落
+  fetch('keys.json', {cache: 'no-store'})
+    .then(r => r.ok ? r.json() : [])
+    .then(d => {
+      if (Array.isArray(d)) remotePubs = d;
+      // 若从证书链接跳转进来，公钥加载完成后自动重验一次
+      if (location.hash.length > 1 && typeof verify === 'function') { try { verify(); } catch(e){} }
+    })
+    .catch(() => {});
+}
+function loadPubs(){ try{ const d = JSON.parse(localStorage.getItem(LS_PUB) || '[]'); localPubs = Array.isArray(d) ? d : []; }catch(e){ localPubs = []; } }
+function savePubs(){ try{ localStorage.setItem(LS_PUB, JSON.stringify(localPubs)); }catch(e){} }
+function allPubs(){
+  const seen = new Set(), out = [];
+  PUBLIC_KEYS.concat(remotePubs).concat(localPubs).forEach(k => {
+    k = String(k).trim().toLowerCase();
+    if (/^04[0-9a-f]{128}$/.test(k) && !seen.has(k)) { seen.add(k); out.push(k); }
+  });
+  return out;
+}
+function ecVerifyAny(msg, sigHex) {
+  const h = sha256(msg.trim().toUpperCase());
+  if (!h) return false;
+  for (const pub of allPubs()) {
+    try { if (ecVerifyOne(pub, h, sigHex)) return true; } catch(e) {}
+  }
+  return false;
+}</script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Avenir Next', Avenir, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    background:
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(123,44,191,0.15), transparent 60%),
+      radial-gradient(ellipse 60% 40% at 0% 100%, rgba(74,144,226,0.12), transparent 60%),
+      #12121a;
+    color: #ddd; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 20px;
+  }
+  .logo {
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+    font-size: 26px; font-weight: 800; letter-spacing: 0.5ch;
+    color: #fff; text-shadow: 0 0 12px rgba(255,255,255,0.5);
+  }
+  .sub { font-size: 11px; letter-spacing: 0.5em; color: rgba(255,255,255,0.4); margin-top: 6px; text-transform: uppercase; }
+  .panel {
+    margin-top: 30px; width: 100%; max-width: 520px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(123,44,191,0.3);
+    border-radius: 16px; padding: 26px;
+    box-shadow: 0 10px 40px rgba(123,44,191,0.2);
+  }
+  .panel label { display:block; font-size:12px; color:#888; margin-bottom:8px; letter-spacing:0.5px; }
+  .panel input {
+    width:100%; background: rgba(255,255,255,0.06);
+    border:1px solid rgba(123,44,191,0.35); border-radius:10px;
+    padding:12px 14px; color:#fff; font-size:15px; outline:none;
+    font-family: ui-monospace, 'SF Mono', Consolas, monospace; letter-spacing:0.05em;
+  }
+  .panel input:focus { border-color:#7B2CBF; box-shadow:0 0 12px rgba(123,44,191,0.4); }
+  .btn {
+    width:100%; margin-top:14px;
+    background: linear-gradient(90deg, #7B2CBF, #4A90E2);
+    color:#fff; border:none; border-radius:50px;
+    padding:12px; font-size:14px; font-weight:bold; letter-spacing:1px; cursor:pointer;
+    box-shadow: 0 4px 15px rgba(123,44,191,0.4);
+  }
+  .btn:active { transform: scale(0.98); }
+  .btn.small { width:auto; padding:7px 16px; font-size:12px; margin-top:0; box-shadow:none; }
+  .btn.danger { background: transparent; border:1px solid rgba(231,76,60,0.6); color:#E74C3C; }
+  .btn.plain { background: transparent; border:1px solid rgba(123,44,191,0.5); color:#C084FC; }
+  .secret-row { margin-top:14px; display:none; }
+  .secret-toggle { margin-top:14px; font-size:12px; color:#666; cursor:pointer; text-align:center; }
+  .secret-toggle:hover { color:#9B59B6; }
+
+  .result {
+    margin-top: 24px; width: 100%; max-width: 520px;
+    border-radius: 16px; padding: 28px; text-align: center;
+    display: none;
+  }
+  .result.ok {
+    display:block;
+    background: rgba(46,204,113,0.08);
+    border: 1px solid rgba(46,204,113,0.45);
+    box-shadow: 0 0 30px rgba(46,204,113,0.15);
+  }
+  .result.bad {
+    display:block;
+    background: rgba(231,76,60,0.08);
+    border: 1px solid rgba(231,76,60,0.45);
+    box-shadow: 0 0 30px rgba(231,76,60,0.15);
+  }
+  .result.warn {
+    display:block;
+    background: rgba(243,156,18,0.08);
+    border: 1px solid rgba(243,156,18,0.5);
+    box-shadow: 0 0 30px rgba(243,156,18,0.15);
+  }
+  .result .icon { font-size: 50px; }
+  .result.ok .icon { color: #2ECC71; text-shadow: 0 0 20px rgba(46,204,113,0.7); }
+  .result.bad .icon { color: #E74C3C; text-shadow: 0 0 20px rgba(231,76,60,0.7); }
+  .result.warn .icon { color: #F39C12; text-shadow: 0 0 20px rgba(243,156,18,0.7); }
+  .result h2 { color:#fff; font-size:21px; margin-top:10px; letter-spacing:0.2em; }
+  .result .meta { margin-top:14px; color:rgba(255,255,255,0.6); font-size:13px; line-height:2; }
+  .result .meta b { color:#C084FC; font-family: ui-monospace, Consolas, monospace; }
+  .result .note { margin-top:12px; font-size:11px; color:rgba(255,255,255,0.35); line-height:1.8; }
+
+  .admin-toggle {
+    margin-top: 34px; font-size: 12px; color: #9B59B6; cursor: pointer;
+    letter-spacing: 0.3em; user-select: none;
+  }
+  .admin-toggle:hover { color: #C084FC; text-shadow: 0 0 8px rgba(123,44,191,0.6); }
+  .admin {
+    margin-top: 16px; width: 100%; max-width: 520px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(123,44,191,0.25);
+    border-radius: 16px; padding: 24px; display: none;
+  }
+  .admin.open { display: block; }
+  .admin h3 { color:#fff; font-size:15px; letter-spacing:0.2em; margin-bottom:4px; }
+  .admin .desc { font-size:11px; color:#777; line-height:1.8; margin-bottom:16px; }
+  .admin label { display:block; font-size:11px; color:#888; margin:12px 0 6px; }
+  .admin input {
+    width:100%; background: rgba(255,255,255,0.06);
+    border:1px solid rgba(123,44,191,0.35); border-radius:10px;
+    padding:10px 12px; color:#fff; font-size:13px; outline:none;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .admin input:focus { border-color:#7B2CBF; }
+  .admin .row { display:flex; gap:10px; }
+  .admin .row > * { flex:1; }
+  .admin .file-btn {
+    display:block; text-align:center; cursor:pointer;
+    border:1px dashed rgba(123,44,191,0.5); border-radius:10px;
+    padding:12px; font-size:13px; color:#C084FC; margin-top:4px;
+  }
+  .admin .file-btn:hover { background: rgba(123,44,191,0.1); }
+  .admin .count { font-size:12px; color:#9B59B6; margin-top:14px; letter-spacing:0.1em; }
+  .entry {
+    display:flex; align-items:center; gap:8px;
+    padding:9px 4px; border-bottom:1px solid rgba(255,255,255,0.05); font-size:12.5px;
+  }
+  .entry .eid { color:#C084FC; font-family:ui-monospace,Consolas,monospace; white-space:nowrap; }
+  .entry .ename { color:#ddd; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entry .enote { color:#777; font-size:11px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .badge { font-size:10px; padding:2px 8px; border-radius:20px; white-space:nowrap; }
+  .badge.ok { background:rgba(46,204,113,0.15); color:#2ECC71; border:1px solid rgba(46,204,113,0.4); }
+  .badge.bad { background:rgba(231,76,60,0.15); color:#E74C3C; border:1px solid rgba(231,76,60,0.4); }
+  .entry-actions { display:flex; gap:6px; }
+  .icon-btn {
+    background:transparent; border:1px solid rgba(255,255,255,0.15); color:#999;
+    border-radius:8px; padding:3px 9px; font-size:11px; cursor:pointer;
+  }
+  .icon-btn:hover { border-color:#7B2CBF; color:#C084FC; }
+  .admin .export-row { display:flex; gap:10px; margin-top:18px; }
+  .admin .export-row .btn { flex:1; }
+
+  #langBtn {
+    position: fixed; top: 14px; right: 16px; z-index: 9999;
+    background: rgba(255,255,255,0.06); color: #C084FC;
+    border: 1px solid rgba(123,44,191,0.5); border-radius: 50px;
+    padding: 6px 16px; font-size: 12px; font-weight: bold; cursor: pointer;
+    letter-spacing: 1px;
+  }
+  #langBtn:hover { border-color: #7B2CBF; box-shadow: 0 0 10px rgba(123,44,191,0.4); }
+
+  .foot { margin-top: 40px; font-size: 11px; color: rgba(255,255,255,0.25); letter-spacing: 0.2em; }
+</style>
+</head>
+<body>
+
+<div class="logo">Eonun</div>
+<div class="sub">Certificate Verification</div>
+<button id="langBtn" onclick="toggleLang()">EN</button>
+
+<div class="panel">
+  <label data-i18n="panel_label">证书编号 + 校验码（扫码得到的字符串，或从证书右下角手动输入）</label>
+  <input id="payload" data-i18n-ph="placeholder" placeholder="EON-2026-0001.9A31C…（编号.128位签名）" spellcheck="false">
+  <button class="btn" onclick="verify()" data-i18n="verify_btn">验 证</button>
+</div>
+
+<div class="result" id="result">
+  <div class="icon" id="r-icon"></div>
+  <h2 id="r-title"></h2>
+  <div class="meta" id="r-meta"></div>
+  <div class="note" id="r-note"></div>
+</div>
+
+<div class="admin-toggle" onclick="openAdmin()">▾ 管理功能（仅本地副本 · 公开网页自动隐藏）</div>
+
+<div class="admin" id="adminPanel">
+  <h3>管理功能</h3>
+  <div class="desc">
+    <b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能（任何人另存到本地可恢复管理——但本地修改只影响自己）。签名私钥从不进入本页面。<br>
+    <b>登记册</b>：纯文本文件（编号 | 姓名 | 状态 | 备注），由你保管；修改后导出覆盖原文件。验证时自动比对：被标记「失效」的证书，即使签名正确也显示已注销。<br>
+    <b>公钥</b>：内置公钥随页面分发（所有人共享的信任基线）；本地追加的公钥只影响本浏览器。想让所有人信任新公钥 → 点「📄 导出 keys.json」上传 GitHub（在生成器密钥库里操作）。<br><b>在线注销</b>：拉黑后点「📄 导出 registry.json」（仅编号+状态，姓名备注不公开）上传 GitHub → 所有在线访客自动看到注销状态，拉黑从此有名有实——对方下载页面改本地也改不了你发布的权威名单。
+  </div>
+
+  <label>导入登记册文件（.txt）</label>
+  <label class="file-btn">选择文件…<input type="file" id="regFile" accept=".txt,.text" style="display:none" onchange="importRegistry(this)"></label>
+
+  <div class="count" id="regCount">登记册未加载</div>
+  <div id="regList"></div>
+
+  <label>新增记录（发证后登记）</label>
+  <div class="row">
+    <input id="n-id" placeholder="证书编号">
+    <input id="n-name" placeholder="学员姓名">
+  </div>
+  <button class="btn plain" style="margin-top:10px" onclick="addEntry()">＋ 添加</button>
+
+  <label>公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重 · 在线页面另读同目录 keys.json，GitHub 上传该文件即可加公信公钥）</label>
+  <div class="count" id="pubCount"></div>
+  <div id="pubList"></div>
+  <div class="row" style="margin-top:10px">
+    <input id="n-pub" placeholder="粘贴新公钥（04 开头，130 位十六进制）">
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label class="btn plain" style="cursor:pointer;text-align:center;flex:1" title="选择生成器导出的私钥备份 JSON 或 keys.json，自动提取其中的公钥（私钥被忽略，绝不保存）">⇪ 导入公钥文件<input type="file" accept=".json" style="display:none" onchange="importPubFile(this)"></label>
+    <button class="btn plain" style="flex:1" onclick="addPub()">✎ 手动添加</button>
+  </div>
+
+  <div class="export-row">
+    <button class="btn" onclick="exportRegistry()">⬇ 导出登记册（保存覆盖原文件）</button>
+    <button class="btn plain" onclick="exportRegistryJson()" title="生成 registry.json 并下载：仅含编号+状态（不含姓名备注），上传 GitHub 与验证页同目录后，所有在线访客自动看到注销状态">📄 导出 registry.json（上传 GitHub · 在线注销名单）</button>
+    <button class="btn plain" onclick="closeAdmin()">收起</button>
+  </div>
+</div>
+
+<div class="foot">SECURED BY ECDSA P-256 · PUBLIC-KEY SIGNATURE · VERIFY OFFLINE</div>
+
+<script>
+/* ---------- 中英切换 ---------- */
+const I18N = {
+  zh: {
+    panel_label: '证书编号 + 校验码（扫码得到的字符串，或从证书右下角手动输入）',
+    placeholder: 'EON-2026-0001.9A31C…（编号.128位签名）',
+    verify_btn: '验 证',
+    fmt_title: '格式无效',
+    fmt_meta: '请输入 <b>编号.签名</b> 格式的完整字符串（签名为 128 位十六进制）',
+    fail_title: '验证失败',
+    fail_note: '本页面仅使用公钥验签，任何人均可安全使用。如确认输入无误，请联系发证方核实。',
+    revoked_title: '证书已注销',
+    revoked_note: '注销备注：{note}<br>本证书及关联回馈权益已失效。',
+    valid_meta_reg: '证书编号<br><b>{id}</b>（{name}）<br>数字签名校验通过 · 登记状态：正常',
+    valid_meta_bare: '证书编号<br><b>{id}</b><br>数字签名校验通过',
+    reg_note_prefix: '登记备注：',
+    bare_note: '发证方未启用登记册或未收录该编号，本结果仅证明签名真实。如证书已挂失，请以发证方记录为准。',
+    admin_toggle: '▾ 管理功能（仅本地副本 · 公开网页自动隐藏）',
+    admin_h3: '管理功能',
+    admin_desc: '<b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能（任何人另存到本地可恢复管理——但本地修改只影响自己）。签名私钥从不进入本页面。<br><b>登记册</b>：纯文本文件（编号 | 姓名 | 状态 | 备注），由你保管；修改后导出覆盖原文件。验证时自动比对：被标记「失效」的证书，即使签名正确也显示已注销。<br><b>公钥</b>：内置公钥随页面分发（所有人共享的信任基线）；本地追加的公钥只影响本浏览器。想让所有人信任新公钥 → 追加进页面代码顶部 PUBLIC_KEYS 后重新分发页面。',
+    reg_import_label: '导入登记册文件（.txt）',
+    choose_file: '选择文件…',
+    reg_empty: '登记册为空',
+    reg_count: '已加载 {n} 条记录（改完记得导出保存）',
+    add_label: '新增记录（发证后登记）',
+    ph_id: '证书编号',
+    ph_name: '学员姓名',
+    add_btn: '＋ 添加',
+    pub_label: '公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重 · 在线页面另读同目录 keys.json，GitHub 上传该文件即可加公信公钥）',
+    pub_count: '共 {n} 把公钥（内置 {e} + 本地 {l}）· 本地修改跨重启保留',
+    ph_pub: '粘贴新公钥（04 开头，130 位十六进制）',
+    add_pub_btn: '＋ 添加公钥',
+    export_reg: '⬇ 导出登记册（保存覆盖原文件）',
+    close_btn: '收起',
+    prompt_revoke: '注销原因（会写入登记册备注，并展示给验证者）：',
+    alert_need_id: '请填证书编号',
+    confirm_del_reg: '确定从登记册删除 {id}？',
+    alert_pub_fmt: '格式不对：需要 04 开头的 130 位十六进制。',
+    alert_pub_curve: '公钥不在曲线上，请检查是否复制完整。',
+    alert_pub_dup: '这把公钥已在列表中。',
+    alert_pub_added: '已添加。此公钥仅保存在本浏览器；如需让所有人信任它，请把它追加进页面代码顶部的 PUBLIC_KEYS 后重新分发/上传页面。',
+    confirm_del_pub: '从本地列表移除这把公钥？（内置公钥不可在此删除，需修改页面代码）'
+  },
+  en: {
+    panel_label: 'Certificate ID + signature (from scanning the QR code, or typed manually from the certificate)',
+    placeholder: 'EON-2026-0001.9A31C… (ID . 128-char signature)',
+    verify_btn: 'VERIFY',
+    fmt_title: 'Invalid format',
+    fmt_meta: 'Enter the full string as <b>ID.SIGNATURE</b> (signature = 128 hex characters)',
+    fail_title: 'Verification failed',
+    fail_note: 'This page verifies with public keys only and is safe for anyone to use. If the input is correct, please contact the issuer.',
+    revoked_title: 'Certificate revoked',
+    revoked_note: 'Revocation note: {note}<br>This certificate and its associated benefits are void.',
+    valid_meta_reg: 'Certificate ID<br><b>{id}</b> ({name})<br>Signature verified · Registry: active',
+    valid_meta_bare: 'Certificate ID<br><b>{id}</b><br>Signature verified',
+    reg_note_prefix: 'Registry note: ',
+    bare_note: 'The issuer has not enabled the registry or has not recorded this ID; this result only confirms the signature. For lost or revoked certificates, refer to the issuer\'s own records.',
+    admin_toggle: '▾ Admin (local copy only · hidden on the public page)',
+    admin_h3: 'Admin',
+    admin_desc: '<b>Mode</b>: this page is manageable when opened <b>locally</b> (double-click); once hosted, the public copy hides this panel and only verifies (anyone can save the page locally to restore admin — but local edits affect only themselves). The signing private key never enters this page.<br><b>Registry</b>: a plain-text file (ID | Name | Status | Notes) kept by you; export to overwrite your copy. Certificates marked "revoked" show as revoked even when the signature is valid.<br><b>Public keys</b>: the built-in key ships with the page (shared trust baseline); locally added keys affect only this browser. To make a new key trusted by everyone, add it to PUBLIC_KEYS at the top of this file and re-publish.',
+    reg_import_label: 'Import registry file (.txt)',
+    choose_file: 'Choose file…',
+    reg_empty: 'Registry is empty',
+    reg_count: '{n} entries loaded (remember to export after editing)',
+    add_label: 'Add entry (after issuing)',
+    ph_id: 'Certificate ID',
+    ph_name: 'Student name',
+    add_btn: '＋ Add',
+    pub_label: 'Public keys (built-in baseline ∪ keys.json ∪ local additions · merged & deduped · the online page also reads keys.json from the same directory — upload that file to GitHub to add trusted keys without touching code)',
+    pub_count: '{n} public keys (built-in {e} + local {l}) · local changes persist across restarts',
+    ph_pub: 'Paste new public key (04 + 130 hex chars)',
+    add_pub_btn: '＋ Add public key',
+    export_reg: '⬇ Export registry (save over your file)',
+    close_btn: 'Close',
+    prompt_revoke: 'Revocation reason (written into the registry notes and shown to verifiers):',
+    alert_need_id: 'Please enter a certificate ID',
+    confirm_del_reg: 'Delete {id} from the registry?',
+    alert_pub_fmt: 'Invalid format: 04 followed by 130 hexadecimal characters.',
+    alert_pub_curve: 'The public key is not on the curve — check that it was copied completely.',
+    alert_pub_dup: 'This public key is already listed.',
+    alert_pub_added: 'Added. This key is stored only in this browser; to make it trusted by everyone, add it to PUBLIC_KEYS at the top of this file and re-publish.',
+    confirm_del_pub: 'Remove this key from the local list? (Built-in keys can only be removed by editing the page code)'
+  }
+};
+let LANG = 'zh';
+function t(k){ return (I18N[LANG] && I18N[LANG][k]) || I18N.zh[k] || k; }
+function tf(k, vars){ let s = t(k); Object.keys(vars).forEach(v => { s = s.split('{'+v+'}').join(vars[v]); }); return s; }
+function toggleLang(){
+  LANG = (LANG === 'zh') ? 'en' : 'zh';
+  try { localStorage.setItem('eonun_lang_v1', LANG); } catch(e) {}
+  applyLang();
+}
+function applyLang(){
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+  const lb = document.getElementById('langBtn');
+  if (lb) lb.textContent = (LANG === 'zh') ? 'EN' : '中';
+  renderRegistry();
+  renderPubAdmin();
+  const r = document.getElementById('result');
+  if (r && (r.classList.contains('ok') || r.classList.contains('bad') || r.classList.contains('warn'))) {
+    try { verify(); } catch(e) {}
+  }
+}
+
+/* ================= 验证逻辑 ================= */
+function verify() {
+  const raw = document.getElementById('payload').value.trim().toUpperCase();
+  const r = document.getElementById('result');
+  const m = raw.match(/^([A-Z0-9\-]+)[.\s]+([A-F0-9]{128})$/);
+  if (!m) {
+    r.className = 'result bad';
+    setR('✕', t('fmt_title'), t('fmt_meta'), '');
+    return;
+  }
+  const id = m[1], sig = m[2];
+  let ok = false;
+  try { ok = ecVerifyAny(id, sig); } catch(e) { ok = false; }
+  if (!ok) {
+    r.className = 'result bad';
+    setR('✕', t('fail_title'), 'Certificate ID<br><b>' + id + '</b><br>' + (LANG==='zh' ? '签名校验不通过，证书疑似伪造或已损坏' : 'Signature check failed — the certificate appears forged or corrupted'),
+         t('fail_note'));
+    return;
+  }
+  // 权威顺序：GitHub 发布的 registry.json > 本地导入的登记册
+  const remote = remoteRegistry.get(id);
+  const entry = remote || registry.get(id);
+  const namePart = entry.name ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
+  if (entry && entry.status === '失效') {
+    r.className = 'result warn';
+    setR('⚠', t('revoked_title'),
+         (LANG === 'zh' ? '证书编号<br><b>' + id + '</b>' + namePart + '<br>数字签名真实，但已被发证方标记注销' : 'Certificate ID<br><b>' + id + '</b>' + namePart + '<br>Signature is genuine, but the issuer has revoked this certificate'),
+         entry.note ? tf('revoked_note', { note: esc(entry.note) })
+                    : (remote ? '' : (LANG === 'zh' ? '<br>本证书及关联回馈权益已失效。' : '<br>This certificate and its associated benefits are void.')));
+  } else if (entry) {
+    r.className = 'result ok';
+    setR('✓', t('valid_title'),
+         (LANG === 'zh' ? '证书编号<br><b>' + id + '</b>' + namePart + '<br>数字签名校验通过 · 登记状态：正常' : 'Certificate ID<br><b>' + id + '</b>' + namePart + '<br>Signature verified · Registry: active'),
+         (!remote && entry.note) ? t('reg_note_prefix') + esc(entry.note) : '');
+  } else {
+    r.className = 'result ok';
+    setR('✓', t('valid_title'), tf('valid_meta_bare', { id: id }), t('bare_note'));
+  }
+}
+function setR(icon, title, meta, note) {
+  document.getElementById('r-icon').textContent = icon;
+  document.getElementById('r-title').textContent = title;
+  document.getElementById('r-meta').innerHTML = meta;
+  document.getElementById('r-note').innerHTML = note || '';
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+/* ================= 登记册逻辑 ================= */
+let registry = new Map();
+const LS_KEY = 'eonun_registry_v1';
+
+function parseRegistry(text) {
+  const map = new Map();
+  text.split(/\r?\n/).forEach(line => {
+    line = line.trim();
+    if (!line || line.startsWith('#')) return;
+    const p = line.split('|').map(s => s.trim());
+    if (p.length >= 3 && p[0]) {
+      map.set(p[0].toUpperCase(), { name: p[1] || '', status: p[2] === '失效' ? '失效' : '有效', note: p[3] || '' });
+    }
+  });
+  return map;
+}
+function serializeRegistry() {
+  let out = '# Eonun 证书登记册\n# 格式：编号 | 姓名 | 状态 | 备注\n# 状态：有效 / 失效（失效=证书注销，权益取消）\n';
+  registry.forEach((e, id) => { out += id + ' | ' + e.name + ' | ' + e.status + ' | ' + e.note + '\n'; });
+  return out;
+}
+function saveLS() {
+  const arr = []; registry.forEach((e, id) => arr.push({id:id, name:e.name, status:e.status, note:e.note}));
+  try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch(e) {}
+}
+function loadLS() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+    arr.forEach(e => registry.set(e.id.toUpperCase(), {name:e.name, status:e.status, note:e.note}));
+  } catch(e) {}
+}
+function importRegistry(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    registry = parseRegistry(reader.result);
+    saveLS(); renderRegistry();
+  };
+  reader.readAsText(f, 'utf-8');
+  input.value = '';
+}
+function addEntry() {
+  const id = document.getElementById('n-id').value.trim().toUpperCase();
+  const name = document.getElementById('n-name').value.trim();
+  if (!id) { alert('请填证书编号'); return; }
+  const old = registry.get(id);
+  registry.set(id, { name: name || (old ? old.name : ''), status: '有效', note: old ? old.note : '' });
+  document.getElementById('n-id').value = ''; document.getElementById('n-name').value = '';
+  saveLS(); renderRegistry();
+}
+function setStatus(id, status) {
+  const e = registry.get(id);
+  if (!e) return;
+  if (status === '失效') {
+    const reason = prompt('注销原因（会写入登记册备注，并展示给验证者）：', e.note || '');
+    if (reason === null) return;
+    e.note = reason.trim();
+  }
+  e.status = status;
+  saveLS(); renderRegistry();
+}
+function delEntry(id) {
+  if (!confirm('确定从登记册删除 ' + id + '？')) return;
+  registry.delete(id); saveLS(); renderRegistry();
+}
+function renderRegistry() {
+  document.getElementById('regCount').textContent = registry.size
+    ? '已加载 ' + registry.size + ' 条记录（改完记得导出保存）' : '登记册为空';
+  let html = '';
+  registry.forEach((e, id) => {
+    html += '<div class="entry">'
+      + '<span class="eid">' + esc(id) + '</span>'
+      + '<span class="ename">' + esc(e.name) + '</span>'
+      + (e.note ? '<span class="enote" title="' + esc(e.note) + '">' + esc(e.note) + '</span>' : '<span class="enote"></span>')
+      + '<span class="badge ' + (e.status === '失效' ? 'bad' : 'ok') + '">' + e.status + '</span>'
+      + '<span class="entry-actions">'
+      + (e.status === '失效'
+         ? '<button class="icon-btn" onclick="setStatus(&quot;' + id + '&quot;,&quot;有效&quot;)">恢复</button>'
+         : '<button class="icon-btn" onclick="setStatus(&quot;' + id + '&quot;,&quot;失效&quot;)">注销</button>')
+      + '<button class="icon-btn" onclick="delEntry(&quot;' + id + '&quot;)">删除</button>'
+      + '</span></div>';
+  });
+  document.getElementById('regList').innerHTML = html;
+}
+function exportRegistryJson(){
+  if (!registry.size) { alert('登记册为空。'); return; }
+  const arr = [];
+  registry.forEach((e, id) => arr.push({ id: id, status: e.status }));
+  const blob = new Blob([JSON.stringify(arr, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'registry.json';
+  a.click(); URL.revokeObjectURL(a.href);
+  alert('已导出 registry.json（仅含编号与状态——姓名与备注留在你的私有 txt 里，不公开）。\n\n上传方法与 keys.json 相同：与 verify.html 同目录传上 GitHub。\n生效后，所有在线访客自动看到注销状态；对方就算下载页面改本地，也改不了你发布的这份名单。');
+}
+
+function exportRegistry() {
+  const blob = new Blob([serializeRegistry()], {type: 'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Eonun-证书登记册.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* 管理模式约定：仅在本地副本（双击打开，file://）开放管理入口；
+   从网址访问的公开副本自动隐藏管理功能，只做验证。
+   说明：这是工作流约定而非安全边界——任何人另存页面到本地即可恢复管理，
+   但本地修改只影响本人；公众验证以你发布的页面为准。 */
+const IS_LOCAL = location.protocol === 'file:';
+function openAdmin(){
+  const p = document.getElementById('adminPanel');
+  p.classList.toggle('open');
+  if (p.classList.contains('open')) renderPubAdmin();
+}
+function closeAdmin(){ document.getElementById('adminPanel').classList.remove('open'); }
+function applyMode(){
+  if (IS_LOCAL) return;
+  const t = document.querySelector('.admin-toggle');
+  if (t) t.style.display = 'none';
+  document.getElementById('adminPanel').classList.remove('open');
+}
+
+function renderPubAdmin(){
+  const c = document.getElementById('pubCount'), l = document.getElementById('pubList');
+  if (!c) return;
+  const embedded = new Set(PUBLIC_KEYS.map(k => String(k).trim().toLowerCase()));
+  const pubs = allPubs();
+  c.textContent = '共 ' + pubs.length + ' 把公钥（内置 ' + PUBLIC_KEYS.length + ' + 本地 ' + localPubs.length + '）· 本地修改跨重启保留';
+  let html = '';
+  pubs.forEach(k => {
+    const isEmb = embedded.has(k);
+    html += '<div class="entry"><span class="eid">' + (isEmb ? '内置' : '本地') + '</span>'
+      + '<span class="enote" title="' + k + '">' + k.slice(0, 24) + '…</span>'
+      + (isEmb ? '<span class="badge ok">随页面分发</span>'
+               : '<span class="entry-actions"><button class="icon-btn" onclick="delPub(&quot;' + k + '&quot;)">删除</button></span>')
+      + '</div>';
+  });
+  l.innerHTML = html;
+}
+function importPubFile(input){
+  const f = input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let d;
+    try { d = JSON.parse(reader.result); } catch(e) { alert('不是有效的 JSON 文件。'); return; }
+    const pubs = [];
+    if (Array.isArray(d)) {
+      d.forEach(x => pubs.push(String(x)));                          // keys.json 格式：公钥数组
+    } else if (d && Array.isArray(d.keys)) {
+      d.keys.forEach(k => { if (k && k.pub) pubs.push(String(k.pub)); });  // 私钥备份格式：自动只取 pub
+    } else if (d && d.pub) {
+      pubs.push(String(d.pub));
+    }
+    let added = 0, skipped = 0;
+    pubs.forEach(p => {
+      const k = String(p).trim().toLowerCase();
+      if (!/^04[0-9a-f]{128}$/.test(k) || !ecPointFromHex(k) || allPubs().includes(k)) { skipped++; return; }
+      localPubs.push(k); added++;
+    });
+    savePubs(); renderPubAdmin();
+    alert('已导入 ' + added + ' 把公钥' + (skipped ? '（跳过 ' + skipped + ' 个无效/重复的）' : '') + '。\n\n说明：备份文件里的私钥字段被完全忽略，本页面绝不保存私钥。想让所有人信任这些公钥，请把它们放进 keys.json 上传到 GitHub。');
+  };
+  reader.readAsText(f, 'utf-8');
+  input.value = '';
+}
+
+function addPub(){
+  const k = document.getElementById('n-pub').value.trim().toLowerCase();
+  if (!/^04[0-9a-f]{128}$/.test(k)) { alert('格式不对：需要 04 开头的 130 位十六进制。'); return; }
+  if (!ecPointFromHex(k)) { alert('公钥不在曲线上，请检查是否复制完整。'); return; }
+  if (allPubs().includes(k)) { alert('这把公钥已在列表中。'); return; }
+  localPubs.push(k); savePubs(); renderPubAdmin();
+  document.getElementById('n-pub').value = '';
+  alert('已添加。此公钥仅保存在本浏览器；如需让所有人信任它，请把它追加进页面代码顶部的 PUBLIC_KEYS 后重新分发/上传页面。');
+}
+function delPub(k){
+  if (!confirm('从本地列表移除这把公钥？（内置公钥不可在此删除，需修改页面代码）')) return;
+  localPubs = localPubs.filter(x => String(x).trim().toLowerCase() !== k);
+  savePubs(); renderPubAdmin();
+}
+
+try { const sv = localStorage.getItem('eonun_lang_v1'); if (sv === 'en' || sv === 'zh') LANG = sv; } catch(e) {}
+loadLS();
+loadPubs();
+loadRemotePubs();
+loadRemoteRegistry();
+renderRegistry();
+applyMode();
+applyLang();
+
+const h = location.hash.slice(1).trim();
+if (h) {
+  document.getElementById('payload').value = decodeURIComponent(h);
+  verify();
+}
+document.getElementById('payload').addEventListener('keydown', e => { if (e.key === 'Enter') verify(); });
+</script>
+
+</body>
+</html>
