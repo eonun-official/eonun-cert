@@ -4,5 +4,5 @@ https://eonunofficial-dotcom.github.io/eonun-cert/verify.html Public-Key Rights 
 
 证书公钥验证机制（非学员请忽略） - Certificate Public-Key verification mechanism (Please disregard if you are not my student)
 
-采用与银行相同的数字签名技术（ECDSA P-256）进行加密。任何人都可以验证，但无人能够伪造。
-Encryption is carried out using the same digital signature technology as that used by banks (ECDSA P-256). Anyone can verify it, but no one can forge it.
+基于 ECC P-256 数字签名，采用经安全审计的实现与严格 low-s 规范。任何人都可以验证，伪造在计算上不可行。
+Digital signatures based on ECC (elliptic-curve cryptography, P-256), using an audited implementation with strict low-S. Anyone can verify; forgery is computationally infeasible.
