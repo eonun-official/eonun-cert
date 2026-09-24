@@ -1,6 +1,6 @@
 # eonun-cert
 
-https://eonunofficial-official.github.io/eonun-cert/verify.html Public-Key Rights Verification
+https://eonun-official.github.io/eonun-cert/verify.html Public-Key Rights Verification
 
 证书公钥验证机制（非学员请忽略） - Certificate Public-Key verification mechanism (Please disregard if you are not my student)
 
