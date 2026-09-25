@@ -95,19 +95,28 @@ const LS_PUB = 'eonun_pubkeys_v1';
 let localPubs = [];
 let remotePubs = [];   // 在线模式从同目录 keys.json 读取（在 GitHub 上传该文件即可新增公信公钥，无需改代码）
 
-let remoteRegistry = new Map();   // 在线模式从同目录 registry.json 读取（仅含编号+状态的公开注销名单）
+let remoteRegistry = new Map();   // 在线模式从同目录 registry.json 读取（统一名单JSON）
 function loadRemoteRegistry(){
   if (location.protocol !== 'https:') return;
   fetch('registry.json', { cache: 'no-store' })
     .then(r => r.ok ? r.json() : [])
     .then(d => {
-      if (Array.isArray(d)) {
-        remoteRegistry = new Map();
-        d.forEach(x => {
-          const i = String(x.id || '').trim().toUpperCase();
-          if (i) remoteRegistry.set(i, { status: x.status === '失效' ? '失效' : '有效' });
-        });
-      }
+      const entries = Array.isArray(d) ? d : (d.entries || []);
+      remoteRegistry = new Map();
+      entries.forEach(x => {
+        const i = String(x.id || '').trim().toUpperCase();
+        if (i) {
+          const status = (x.status || 'inactive').toLowerCase();
+          remoteRegistry.set(i, {
+            name: x.name || '',
+            status: ['active', 'revoked'].includes(status) ? status : 'inactive',
+            note: x.note || ''
+          });
+        }
+      });
+      // 在线名单与本地名单合并（在线优先）
+      remoteRegistry.forEach((e, id) => unifiedRegistry.set(id, e));
+      saveLS(); renderRegistry();
       if (location.hash.length > 1 && typeof verify === 'function') { try { verify(); } catch(e){} }
     })
     .catch(() => {});
@@ -308,25 +317,19 @@ function ecVerifyAny(msg, sigHex) {
 <div class="admin" id="adminPanel">
   <h3>管理功能</h3>
   <div class="desc">
-    <b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能（任何人另存到本地可恢复管理——但本地修改只影响自己）。签名私钥从不进入本页面。<br>
-    <b>登记册</b>：纯文本文件（编号 | 姓名 | 状态 | 备注），由你保管；修改后导出覆盖原文件。验证时自动比对：被标记「失效」的证书，即使签名正确也显示已注销。<br>
-    <b>公钥</b>：内置公钥随页面分发（所有人共享的信任基线）；本地追加的公钥只影响本浏览器。想让所有人信任新公钥 → 点「📄 导出 keys.json」上传 GitHub（在生成器密钥库里操作）。<br><b>在线注销</b>：拉黑后点「📄 导出 registry.json」（仅编号+状态，姓名备注不公开）上传 GitHub → 所有在线访客自动看到注销状态，拉黑从此有名有实——对方下载页面改本地也改不了你发布的权威名单。
+    <b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能。签名私钥从不进入本页面。<br><br>
+    <b>统一名单</b>：JSON 格式（编号、姓名、状态、备注），由登记程序生成。状态分为三种：「active」= 已激活（白名单）、「revoked」= 已注销（黑名单）、「inactive」= 未激活。验证时自动比对。<br>
+    <b>在线同步</b>：将登记程序导出的 registry.json 上传 GitHub（与验证页同目录），所有在线访客自动同步名单。<br>
+    <b>公钥</b>：内置公钥随页面分发；本地追加的公钥只影响本浏览器。
   </div>
 
-  <label>导入登记册文件（.txt）</label>
-  <label class="file-btn">选择文件…<input type="file" id="regFile" accept=".txt,.text" style="display:none" onchange="importRegistry(this)"></label>
+  <label>导入统一名单（.json）</label>
+  <label class="file-btn">选择文件…<input type="file" id="regFile" accept=".json" style="display:none" onchange="importRegistry(this)"></label>
 
-  <div class="count" id="regCount">登记册未加载</div>
+  <div class="count" id="regCount">名单未加载</div>
   <div id="regList"></div>
 
-  <label>新增记录（发证后登记）</label>
-  <div class="row">
-    <input id="n-id" placeholder="证书编号">
-    <input id="n-name" placeholder="学员姓名">
-  </div>
-  <button class="btn plain" style="margin-top:10px" onclick="addEntry()">＋ 添加</button>
-
-  <label>公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重 · 在线页面另读同目录 keys.json，GitHub 上传该文件即可加公信公钥）</label>
+  <label>公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重）</label>
   <div class="count" id="pubCount"></div>
   <div id="pubList"></div>
   <div class="row" style="margin-top:10px">
@@ -338,8 +341,6 @@ function ecVerifyAny(msg, sigHex) {
   </div>
 
   <div class="export-row">
-    <button class="btn" onclick="exportRegistry()">⬇ 导出登记册（保存覆盖原文件）</button>
-    <button class="btn plain" onclick="exportRegistryJson()" title="生成 registry.json 并下载：仅含编号+状态（不含姓名备注），上传 GitHub 与验证页同目录后，所有在线访客自动看到注销状态">📄 导出 registry.json（上传 GitHub · 在线注销名单）</button>
     <button class="btn plain" onclick="closeAdmin()">收起</button>
   </div>
 </div>
@@ -364,13 +365,15 @@ const I18N = {
     valid_meta_bare: '证书编号<br><b>{id}</b><br>数字签名校验通过',
     reg_note_prefix: '登记备注：',
     bare_note: '发证方未启用登记册或未收录该编号，本结果仅证明签名真实。如证书已挂失，请以发证方记录为准。',
+    active_title: '证书未激活',
+    active_note: '该证书签名真实，但当前未在激活名单中。请联系发证方核实。',
     admin_toggle: '▾ 管理功能（仅本地副本 · 公开网页自动隐藏）',
     admin_h3: '管理功能',
-    admin_desc: '<b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能（任何人另存到本地可恢复管理——但本地修改只影响自己）。签名私钥从不进入本页面。<br><b>登记册</b>：纯文本文件（编号 | 姓名 | 状态 | 备注），由你保管；修改后导出覆盖原文件。验证时自动比对：被标记「失效」的证书，即使签名正确也显示已注销。<br><b>公钥</b>：内置公钥随页面分发（所有人共享的信任基线）；本地追加的公钥只影响本浏览器。想让所有人信任新公钥 → 追加进页面代码顶部 PUBLIC_KEYS 后重新分发页面。',
-    reg_import_label: '导入登记册文件（.txt）',
+    admin_desc: '<b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能。签名私钥从不进入本页面。<br><br><b>统一名单</b>：JSON 格式（编号、姓名、状态、备注），由登记程序生成。状态分为三种：「active」= 已激活（白名单）、「revoked」= 已注销（黑名单）、「inactive」= 未激活。验证时自动比对。<br><b>在线同步</b>：将登记程序导出的 registry.json 上传 GitHub（与验证页同目录），所有在线访客自动同步名单。<br><b>公钥</b>：内置公钥随页面分发；本地追加的公钥只影响本浏览器。',
+    reg_import_label: '导入统一名单（.json）',
     choose_file: '选择文件…',
-    reg_empty: '登记册为空',
-    reg_count: '已加载 {n} 条记录（改完记得导出保存）',
+    reg_empty: '名单为空',
+    reg_count: '已加载 {n} 条记录',
     add_label: '新增记录（发证后登记）',
     ph_id: '证书编号',
     ph_name: '学员姓名',
@@ -405,13 +408,15 @@ const I18N = {
     valid_meta_bare: 'Certificate ID<br><b>{id}</b><br>Signature verified',
     reg_note_prefix: 'Registry note: ',
     bare_note: 'The issuer has not enabled the registry or has not recorded this ID; this result only confirms the signature. For lost or revoked certificates, refer to the issuer\'s own records.',
+    active_title: 'Certificate not activated',
+    active_note: 'The signature is genuine, but this certificate is not in the active list. Please contact the issuer.',
     admin_toggle: '▾ Admin (local copy only · hidden on the public page)',
     admin_h3: 'Admin',
-    admin_desc: '<b>Mode</b>: this page is manageable when opened <b>locally</b> (double-click); once hosted, the public copy hides this panel and only verifies (anyone can save the page locally to restore admin — but local edits affect only themselves). The signing private key never enters this page.<br><b>Registry</b>: a plain-text file (ID | Name | Status | Notes) kept by you; export to overwrite your copy. Certificates marked "revoked" show as revoked even when the signature is valid.<br><b>Public keys</b>: the built-in key ships with the page (shared trust baseline); locally added keys affect only this browser. To make a new key trusted by everyone, add it to PUBLIC_KEYS at the top of this file and re-publish.',
-    reg_import_label: 'Import registry file (.txt)',
+    admin_desc: '<b>Mode</b>: this page is manageable when opened <b>locally</b> (double-click); once hosted, the public copy hides this panel and only verifies. The signing private key never enters this page.<br><br><b>Unified registry</b>: JSON format (ID, Name, Status, Notes), generated by the registration program. Status has three values: "active" = activated (whitelist), "revoked" = revoked (blacklist), "inactive" = not activated. Automatically checked during verification.<br><b>Online sync</b>: upload registry.json exported from the registration program to GitHub (same directory as verify.html), all online visitors automatically sync.<br><b>Public keys</b>: built-in keys ship with the page; locally added keys affect only this browser.',
+    reg_import_label: 'Import unified registry (.json)',
     choose_file: 'Choose file…',
     reg_empty: 'Registry is empty',
-    reg_count: '{n} entries loaded (remember to export after editing)',
+    reg_count: '{n} entries loaded',
     add_label: 'Add entry (after issuing)',
     ph_id: 'Certificate ID',
     ph_name: 'Student name',
@@ -473,24 +478,30 @@ function verify() {
          t('fail_note'));
     return;
   }
-  // 权威顺序：GitHub 发布的 registry.json > 本地导入的登记册
-  const remote = remoteRegistry.get(id);
-  const entry = remote || registry.get(id);
+  // 统一名单查询：先查黑名单(revoked) → 再查白名单(active) → 其余为未激活
+  const entry = unifiedRegistry.get(id);
   const namePart = (entry && entry.name) ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
-  if (entry && entry.status === '失效') {
+  const status = entry ? entry.status : 'inactive';
+
+  if (status === 'revoked') {
+    // 黑名单：已注销/封禁
     r.className = 'result warn';
     setR('⚠', t('revoked_title'),
-         (LANG === 'zh' ? '证书编号<br><b>' + id + '</b>' + namePart + '<br>数字签名真实，但已被发证方标记注销' : 'Certificate ID<br><b>' + id + '</b>' + namePart + '<br>Signature is genuine, but the issuer has revoked this certificate'),
+         (LANG === 'zh' ? '证件编号<br><b>' + id + '</b>' + namePart + '<br>数字签名真实，但已被发证方标记注销' : 'Document ID<br><b>' + id + '</b>' + namePart + '<br>Signature is genuine, but the issuer has revoked this document'),
          entry.note ? tf('revoked_note', { note: esc(entry.note) })
-                    : (remote ? '' : (LANG === 'zh' ? '<br>本证书及关联回馈权益已失效。' : '<br>This certificate and its associated benefits are void.')));
-  } else if (entry) {
+                    : (LANG === 'zh' ? '<br>本证件及关联权益已失效。' : '<br>This document and its associated benefits are void.'));
+  } else if (status === 'active') {
+    // 白名单：已激活
     r.className = 'result ok';
     setR('✓', t('valid_title'),
-         (LANG === 'zh' ? '证书编号<br><b>' + id + '</b>' + namePart + '<br>数字签名校验通过 · 登记状态：正常' : 'Certificate ID<br><b>' + id + '</b>' + namePart + '<br>Signature verified · Registry: active'),
-         (!remote && entry.note) ? t('reg_note_prefix') + esc(entry.note) : '');
+         (LANG === 'zh' ? '证件编号<br><b>' + id + '</b>' + namePart + '<br>数字签名校验通过 · 已激活' : 'Document ID<br><b>' + id + '</b>' + namePart + '<br>Signature verified · Active'),
+         entry.note ? t('reg_note_prefix') + esc(entry.note) : '');
   } else {
-    r.className = 'result ok';
-    setR('✓', t('valid_title'), tf('valid_meta_bare', { id: id }), t('bare_note'));
+    // 未激活（inactive 或未找到）
+    r.className = 'result warn';
+    setR('⚠', t('active_title'),
+         (LANG === 'zh' ? '证件编号<br><b>' + id + '</b>' + namePart + '<br>数字签名真实，但当前未激活' : 'Document ID<br><b>' + id + '</b>' + namePart + '<br>Signature is genuine, but not currently activated'),
+         t('active_note'));
   }
 }
 function setR(icon, title, meta, note) {
@@ -501,35 +512,40 @@ function setR(icon, title, meta, note) {
 }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
-/* ================= 登记册逻辑 ================= */
-let registry = new Map();
-const LS_KEY = 'eonun_registry_v1';
+/* ================= 统一名单逻辑（只读） ================= */
+let unifiedRegistry = new Map();
+const LS_KEY = 'eonun_registry_v2';
 
-function parseRegistry(text) {
+function parseUnifiedRegistry(text) {
   const map = new Map();
-  text.split(/\r?\n/).forEach(line => {
-    line = line.trim();
-    if (!line || line.startsWith('#')) return;
-    const p = line.split('|').map(s => s.trim());
-    if (p.length >= 3 && p[0]) {
-      map.set(p[0].toUpperCase(), { name: p[1] || '', status: p[2] === '失效' ? '失效' : '有效', note: p[3] || '' });
-    }
-  });
+  try {
+    const data = JSON.parse(text);
+    const entries = Array.isArray(data) ? data : (data.entries || []);
+    entries.forEach(e => {
+      if (e && e.id) {
+        const status = (e.status || 'inactive').toLowerCase();
+        map.set(e.id.toUpperCase(), {
+          name: e.name || '',
+          status: ['active', 'revoked'].includes(status) ? status : 'inactive',
+          note: e.note || '',
+          type: e.type || ''
+        });
+      }
+    });
+  } catch(err) {
+    // 解析失败返回空Map
+  }
   return map;
 }
-function serializeRegistry() {
-  let out = '# Eonun 证书登记册\n# 格式：编号 | 姓名 | 状态 | 备注\n# 状态：有效 / 失效（失效=证书注销，权益取消）\n';
-  registry.forEach((e, id) => { out += id + ' | ' + e.name + ' | ' + e.status + ' | ' + e.note + '\n'; });
-  return out;
-}
 function saveLS() {
-  const arr = []; registry.forEach((e, id) => arr.push({id:id, name:e.name, status:e.status, note:e.note}));
+  const arr = [];
+  unifiedRegistry.forEach((e, id) => arr.push({id:id, name:e.name, status:e.status, note:e.note, type:e.type}));
   try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch(e) {}
 }
 function loadLS() {
   try {
     const arr = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
-    arr.forEach(e => registry.set(e.id.toUpperCase(), {name:e.name, status:e.status, note:e.note}));
+    arr.forEach(e => unifiedRegistry.set(e.id.toUpperCase(), {name:e.name, status:e.status, note:e.note, type:e.type}));
   } catch(e) {}
 }
 function importRegistry(input) {
@@ -537,74 +553,29 @@ function importRegistry(input) {
   if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
-    registry = parseRegistry(reader.result);
+    unifiedRegistry = parseUnifiedRegistry(reader.result);
     saveLS(); renderRegistry();
   };
   reader.readAsText(f, 'utf-8');
   input.value = '';
 }
-function addEntry() {
-  const id = document.getElementById('n-id').value.trim().toUpperCase();
-  const name = document.getElementById('n-name').value.trim();
-  if (!id) { alert('请填证书编号'); return; }
-  const old = registry.get(id);
-  registry.set(id, { name: name || (old ? old.name : ''), status: '有效', note: old ? old.note : '' });
-  document.getElementById('n-id').value = ''; document.getElementById('n-name').value = '';
-  saveLS(); renderRegistry();
-}
-function setStatus(id, status) {
-  const e = registry.get(id);
-  if (!e) return;
-  if (status === '失效') {
-    const reason = prompt('注销原因（会写入登记册备注，并展示给验证者）：', e.note || '');
-    if (reason === null) return;
-    e.note = reason.trim();
-  }
-  e.status = status;
-  saveLS(); renderRegistry();
-}
-function delEntry(id) {
-  if (!confirm('确定从登记册删除 ' + id + '？')) return;
-  registry.delete(id); saveLS(); renderRegistry();
-}
 function renderRegistry() {
-  document.getElementById('regCount').textContent = registry.size
-    ? '已加载 ' + registry.size + ' 条记录（改完记得导出保存）' : '登记册为空';
+  document.getElementById('regCount').textContent = unifiedRegistry.size
+    ? '已加载 ' + unifiedRegistry.size + ' 条记录' : '名单为空';
   let html = '';
-  registry.forEach((e, id) => {
+  unifiedRegistry.forEach((e, id) => {
+    const stLabel = e.status === 'active' ? (LANG==='zh'?'已激活':'Active')
+                  : e.status === 'revoked' ? (LANG==='zh'?'已注销':'Revoked')
+                  : (LANG==='zh'?'未激活':'Inactive');
+    const stClass = e.status === 'active' ? 'ok' : e.status === 'revoked' ? 'bad' : '';
     html += '<div class="entry">'
       + '<span class="eid">' + esc(id) + '</span>'
       + '<span class="ename">' + esc(e.name) + '</span>'
       + (e.note ? '<span class="enote" title="' + esc(e.note) + '">' + esc(e.note) + '</span>' : '<span class="enote"></span>')
-      + '<span class="badge ' + (e.status === '失效' ? 'bad' : 'ok') + '">' + e.status + '</span>'
-      + '<span class="entry-actions">'
-      + (e.status === '失效'
-         ? '<button class="icon-btn" onclick="setStatus(&quot;' + id + '&quot;,&quot;有效&quot;)">恢复</button>'
-         : '<button class="icon-btn" onclick="setStatus(&quot;' + id + '&quot;,&quot;失效&quot;)">注销</button>')
-      + '<button class="icon-btn" onclick="delEntry(&quot;' + id + '&quot;)">删除</button>'
-      + '</span></div>';
+      + '<span class="badge ' + stClass + '">' + stLabel + '</span>'
+      + '</div>';
   });
   document.getElementById('regList').innerHTML = html;
-}
-function exportRegistryJson(){
-  if (!registry.size) { alert('登记册为空。'); return; }
-  const arr = [];
-  registry.forEach((e, id) => arr.push({ id: id, status: e.status }));
-  const blob = new Blob([JSON.stringify(arr, null, 2)], {type: 'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'registry.json';
-  a.click(); URL.revokeObjectURL(a.href);
-  alert('已导出 registry.json（仅含编号与状态——姓名与备注留在你的私有 txt 里，不公开）。\n\n上传方法与 keys.json 相同：与 verify.html 同目录传上 GitHub。\n生效后，所有在线访客自动看到注销状态；对方就算下载页面改本地，也改不了你发布的这份名单。');
-}
-
-function exportRegistry() {
-  const blob = new Blob([serializeRegistry()], {type: 'text/plain;charset=utf-8'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'Eonun-证书登记册.txt';
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
 /* 管理模式约定：仅在本地副本（双击打开，file://）开放管理入口；
@@ -691,6 +662,7 @@ loadPubs();
 loadRemotePubs();
 loadRemoteRegistry();
 renderRegistry();
+renderPubAdmin();
 applyMode();
 applyLang();
 
