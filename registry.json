@@ -1,0 +1,26 @@
+[
+  {
+    "id": "OPN-2026-0301-0666",
+    "name": "伪劣产品",
+    "status": "revoked",
+    "type": "openclass",
+    "note": "偷盗",
+    "date": "2026-09-25"
+  },
+  {
+    "id": "OPN-2026-0301-0001",
+    "name": "李大壮",
+    "status": "active",
+    "type": "openclass",
+    "note": "缺课程",
+    "date": "2026-09-25"
+  },
+  {
+    "id": "GUT-2026-0215-1666",
+    "name": "1000元代金券",
+    "status": "active",
+    "type": "voucher",
+    "note": "未使用",
+    "date": "2026-09-25"
+  }
+]
