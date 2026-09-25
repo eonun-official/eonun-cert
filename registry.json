@@ -22,5 +22,13 @@
     "type": "voucher",
     "note": "还没有使用",
     "date": "2026-09-25"
+  },
+  {
+    "id": "EONX-2026-0000-0001",
+    "name": "未命名 假的成员测试",
+    "status": "revoked",
+    "type": "pass",
+    "note": "虚假成员",
+    "date": "2026-09-25"
   }
 ]
