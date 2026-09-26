@@ -97,7 +97,7 @@ let remotePubs = [];   // 在线模式从同目录 keys.json 读取（在 GitHub
 
 let remoteRegistry = new Map();   // 在线模式从同目录 registry.json 读取（统一名单JSON）
 function loadRemoteRegistry(){
-  if (location.protocol !== 'https:') return;
+  if (location.protocol === 'file:') return;   // 本地文件协议不加载远程
   fetch('registry.json', { cache: 'no-store' })
     .then(r => r.ok ? r.json() : [])
     .then(d => {
@@ -123,7 +123,7 @@ function loadRemoteRegistry(){
 }
 
 function loadRemotePubs(){
-  if (location.protocol !== 'https:') return;   // 本地 file:// 读不了，静默回落
+  if (location.protocol === 'file:') return;   // 本地 file:// 读不了，静默回落
   fetch('keys.json', {cache: 'no-store'})
     .then(r => r.ok ? r.json() : [])
     .then(d => {
@@ -292,6 +292,7 @@ function ecVerifyAny(msg, sigHex) {
 
   .foot { margin-top: 40px; font-size: 11px; color: rgba(255,255,255,0.25); letter-spacing: 0.2em; }
 </style>
+<base target="_blank">
 </head>
 <body>
 
@@ -553,7 +554,8 @@ function importRegistry(input) {
   if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
-    unifiedRegistry = parseUnifiedRegistry(reader.result);
+    const imported = parseUnifiedRegistry(reader.result);
+    imported.forEach((e, id) => unifiedRegistry.set(id, e));   // 合并（导入优先）
     saveLS(); renderRegistry();
   };
   reader.readAsText(f, 'utf-8');
